@@ -23,7 +23,7 @@ def main():
     model_df = pd.read_parquet(OUTPUT_FILES['model_sample'])
     y, X, X_cols = get_y_X(model_df)
     X_const = sm.add_constant(X)
-    model_ols = sm.OLS(y, X_const).fit()
+    model_ols = sm.OLS(y, X_const).fit(cov_type='HC1')
     e = model_ols.resid
     beta = model_ols.params
     n = len(y)

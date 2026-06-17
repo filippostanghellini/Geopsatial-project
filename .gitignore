@@ -39,3 +39,4 @@ outputs/
 reports/figures/
 reports/maps/
 .DS_Store
+.report/

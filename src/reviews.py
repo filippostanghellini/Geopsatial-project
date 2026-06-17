@@ -1,6 +1,6 @@
 import pandas as pd
 import logging
-from datetime import datetime
+from .config import SNAPSHOT_DATE
 
 logger = logging.getLogger(__name__)
 
@@ -25,8 +25,8 @@ def clean_and_aggregate_reviews(df):
         last_review_date=('date', 'max'),
     ).reset_index()
 
-    now = datetime.now()
-    agg['days_since_last_review'] = (now - agg['last_review_date']).dt.days
+    reference_date = pd.Timestamp(SNAPSHOT_DATE)
+    agg['days_since_last_review'] = (reference_date - agg['last_review_date']).dt.days
     agg['months_active'] = ((agg['last_review_date'] - agg['first_review_date']).dt.days / 30.44).clip(lower=1)
     agg['reviews_per_month'] = agg['review_count_total'] / agg['months_active']
 

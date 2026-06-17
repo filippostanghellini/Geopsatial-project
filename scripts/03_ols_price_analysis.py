@@ -64,7 +64,7 @@ def main():
             print(f"  {var:30s}  coef={coef:8.4f}  se={se:8.4f}  p={pval:.4e} {sig}")
 
     coef_df = pd.DataFrame({
-        'variable': [f'x{i}' for i in range(len(model_b.params))],
+        'variable': X_const_cols,
         'coefficient': model_b.params,
         'std_error': model_b.bse,
         'p_value': model_b.pvalues,

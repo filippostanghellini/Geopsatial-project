@@ -46,7 +46,7 @@ def compute_sdm_impacts(W, rho, betas_X, betas_WX, var_names):
     Total_k   = (β_k + θ_k) / (1-ρ)   [exact for row-standardized W]
     Indirect  = Total - Direct
     """
-    avg_R1, avg_R2 = mc_traces(W, rho, n_mc=30, seed=RANDOM_SEED)
+    avg_R1, avg_R2 = mc_traces(W, rho, n_mc=200, seed=RANDOM_SEED)
     total_mult = 1.0 / (1.0 - rho)
 
     impacts = []
@@ -69,7 +69,7 @@ def compute_sdm_impacts(W, rho, betas_X, betas_WX, var_names):
 
 def compute_sar_impacts(W, rho, betas, var_names):
     """SAR: indirect/direct ratio is constrained (same for all variables)."""
-    avg_R1, _ = mc_traces(W, rho, n_mc=30, seed=RANDOM_SEED)
+    avg_R1, _ = mc_traces(W, rho, n_mc=200, seed=RANDOM_SEED)
     total_mult = 1.0 / (1.0 - rho)
 
     impacts = []
@@ -200,10 +200,6 @@ def main():
     model_df = pd.read_parquet(OUTPUT_FILES['model_sample'])
     y, X, X_cols = get_y_X(model_df)
 
-    structural_cols = [c for c in X_cols if not c.startswith('neigh_')]
-    X_struct_idx = [X_cols.index(c) for c in structural_cols]
-    X_struct = X[:, X_struct_idx]
-
     gdf_points = gpd.GeoDataFrame(
         model_df,
         geometry=gpd.points_from_xy(model_df['longitude'], model_df['latitude']),
@@ -217,17 +213,17 @@ def main():
 
     # ---- SAR ----
     print("\n[1/2] Estimating SAR...")
-    model_sar = GM_Lag(y, X_struct, w=w, name_y='log_price', name_x=structural_cols, robust='white')
+    model_sar = GM_Lag(y, X, w=w, name_y='log_price', name_x=X_cols, robust='white')
     rho_sar = float(model_sar.rho.flatten()[0])
 
     print(f"  ρ = {rho_sar:.4f}   Pseudo-R² = {model_sar.pr2:.4f}")
 
     sar_betas = model_sar.betas.flatten()
-    if len(sar_betas) > len(structural_cols):
-        sar_betas = sar_betas[:len(structural_cols)]
+    if len(sar_betas) > len(X_cols):
+        sar_betas = sar_betas[:len(X_cols)]
 
     sar_impacts, sar_dir, sar_ind, sar_tot = compute_sar_impacts(
-        W, rho_sar, sar_betas, structural_cols
+        W, rho_sar, sar_betas, X_cols
     )
 
     print(f"\n  Multipliers: direct={sar_dir:.4f}  indirect={sar_ind:.4f}  total={sar_tot:.4f}")
@@ -235,11 +231,11 @@ def main():
 
     # ---- SDM ----
     print("\n[2/2] Estimating SDM (Spatial Durbin, GMM)...")
-    model_sdm = GM_Combo(y, X_struct, w=w, slx_lags=1, vm=True,
-                          name_y='log_price', name_x=structural_cols)
+    model_sdm = GM_Combo(y, X, w=w, slx_lags=1, vm=True,
+                          name_y='log_price', name_x=X_cols)
 
     rho_sdm = float(model_sdm.rho.flatten()[0])
-    k = len(structural_cols)
+    k = len(X_cols)
     betas_all = model_sdm.betas.flatten()
     betas_X = betas_all[:k]
     betas_WX = betas_all[k:2*k]
@@ -248,7 +244,7 @@ def main():
     print(f"  betas_X (n={len(betas_X)}), betas_WX (n={len(betas_WX)})")
 
     sdm_impacts, sdm_R1, sdm_R2, sdm_tot = compute_sdm_impacts(
-        W, rho_sdm, betas_X, betas_WX, structural_cols
+        W, rho_sdm, betas_X, betas_WX, X_cols
     )
 
     print(f"\n  Multipliers:  R₁={sdm_R1:.4f}  R₂={sdm_R2:.4f}  total={sdm_tot:.4f}")
@@ -271,8 +267,8 @@ def main():
     print("-" * 80)
 
     for var in key_vars:
-        if var in structural_cols:
-            idx = structural_cols.index(var)
+        if var in X_cols:
+            idx = X_cols.index(var)
             s = sar_impacts[idx]
             d = sdm_impacts[idx]
             print(f"  {var:<18s} │ {s['direct']:10.4f} {s['indirect']:12.4f} │ "
@@ -293,8 +289,8 @@ def main():
     sar_resid = model_sar.u.flatten()
     sdm_resid = model_sdm.u.flatten()
 
-    Xb_sar = X_struct @ sar_betas
-    Xb_sdm = X_struct @ betas_X
+    Xb_sar = X @ sar_betas
+    Xb_sdm = X @ betas_X
     Wy = W @ y
 
     spillover = pd.DataFrame({
@@ -305,7 +301,7 @@ def main():
         'sar_rho_Wy': rho_sar * Wy,
         'sdm_own': Xb_sdm,
         'sdm_rho_Wy': rho_sdm * Wy,
-        'sdm_WX_contrib': X_struct @ betas_WX,
+        'sdm_WX_contrib': X @ betas_WX,
         'sar_residual': sar_resid,
         'sdm_residual': sdm_resid,
         'lat': model_df['latitude'].values,

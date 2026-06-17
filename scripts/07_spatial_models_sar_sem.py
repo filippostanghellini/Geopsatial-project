@@ -38,19 +38,15 @@ def main():
     w = KNN.from_dataframe(gdf_proj, k=8)
     w.transform = 'r'
 
-    structural_cols = [c for c in X_cols if not c.startswith('neigh_')]
-    X_struct_idx = [X_cols.index(c) for c in structural_cols]
-    X_struct = X[:, X_struct_idx]
-
-    print("\n--- OLS Parsimonious (structural vars only) ---")
-    X_const = sm.add_constant(X_struct)
+    print("\n--- OLS (Model B completo) ---")
+    X_const = sm.add_constant(X)
     model_ols = sm.OLS(y, X_const).fit(cov_type='HC1')
     print(f"  R-squared: {model_ols.rsquared:.4f}")
     print(f"  Adj R-squared: {model_ols.rsquared_adj:.4f}")
 
     print("\n--- SAR Model (Spatial Lag, GMM) ---")
     try:
-        model_sar = GM_Lag(y, X_struct, w=w, name_y='log_price', name_x=structural_cols, robust='white')
+        model_sar = GM_Lag(y, X, w=w, name_y='log_price', name_x=X_cols, robust='white')
         print(f"  Pseudo R-squared: {model_sar.pr2:.4f}")
         if hasattr(model_sar, 'rho'):
             rho_val = model_sar.rho
@@ -65,7 +61,7 @@ def main():
 
     print("\n--- SEM Model (Spatial Error, GMM) ---")
     try:
-        model_sem = GM_Error(y, X_struct, w=w, name_y='log_price', name_x=structural_cols)
+        model_sem = GM_Error(y, X, w=w, name_y='log_price', name_x=X_cols, robust='white')
         print(f"  Pseudo R-squared: {model_sem.pr2:.4f}")
         lam_val = getattr(model_sem, 'lam', getattr(model_sem, 'lambda_', None))
         if lam_val is not None:
@@ -104,6 +100,15 @@ def main():
         'moran_p': [moran_ols.p_sim, moran_sar.p_sim if moran_sar else np.nan, moran_sem.p_sim if moran_sem else np.nan],
     }
     save_csv(pd.DataFrame(comparison), TABLES_DIR / 'model_comparison.csv')
+
+    residuals_df = pd.DataFrame({
+        'listing_id': model_df['listing_id'].values,
+        'ols_residual': model_ols.resid,
+        'sar_residual': model_sar.u.flatten() if model_sar else np.nan,
+        'sem_residual': model_sem.u.flatten() if model_sem else np.nan,
+    })
+    save_csv(residuals_df, OUTPUT_FILES['residuals_for_map'])
+    print(f"Residuals saved: {len(residuals_df)} listings")
 
     fig, ax = plt.subplots(figsize=(10, 6))
     models = ['OLS', 'SAR', 'SEM']
