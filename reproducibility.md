@@ -4,14 +4,14 @@
 
 - Python 3.12
 - Conda environment specified in `environment/environment.yml`
-- Key packages: geopandas, libpysal, esda, spreg, statsmodels, scikit-learn
+- Key packages: geopandas, libpysal, esda, spreg, statsmodels, pyarrow
 
 ## Data
 
 - Source: Inside Airbnb (https://insideairbnb.com/)
 - City: Milan, Lombardy, Italy
 - Snapshot date: 22 September 2025
-- Files: listings.csv.gz, calendar.csv.gz, reviews.csv.gz, neighbourhoods.geojson
+- Files: listings.csv, calendar.csv, reviews.csv, neighbourhoods.geojson, listings_summary.csv, reviews_summary.csv
 
 ## CRS Policy
 
@@ -48,11 +48,14 @@
 
 1. `notebooks/01_data_pipeline.ipynb` (ETL)
 2. `scripts/01_verify_spatial_data.py` (verification)
-3. `scripts/03_ols_price_analysis.py` (OLS models)
-4. `scripts/04_spatial_autocorr_morans_i.py` (Moran's I)
-5. `scripts/05_lm_diagnostic_tests.py` (LM diagnostics)
-6. `scripts/07_spatial_models_sar_sem.py` (SAR/SEM)
-7. `scripts/02_make_static_map_overview.py` (maps)
+3. `scripts/02_make_static_map_overview.py` (maps)
+4. `scripts/03_ols_price_analysis.py` (OLS models)
+5. `scripts/04_spatial_autocorr_morans_i.py` (Moran's I)
+6. `scripts/05_lm_diagnostic_tests.py` (LM diagnostics)
+7. `scripts/07_spatial_models_sar_sem.py` (SAR/SEM)
+8. `scripts/07b_extract_residuals.py` (residuals)
+9. `scripts/08_prepare_map_layers.py` (map layers)
+10. `scripts/09_compute_spatial_effects.py` (spatial effects)
 
 ## Random Seed
 

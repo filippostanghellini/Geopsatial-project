@@ -27,11 +27,14 @@ jupyter execute notebooks/01_data_pipeline.ipynb --inplace
 
 ```bash
 python scripts/01_verify_spatial_data.py
+python scripts/02_make_static_map_overview.py
 python scripts/03_ols_price_analysis.py
 python scripts/04_spatial_autocorr_morans_i.py
 python scripts/05_lm_diagnostic_tests.py
 python scripts/07_spatial_models_sar_sem.py
-python scripts/02_make_static_map_overview.py
+python scripts/07b_extract_residuals.py
+python scripts/08_prepare_map_layers.py
+python scripts/09_compute_spatial_effects.py
 ```
 
 ### 5) Web map (optional)
@@ -53,8 +56,12 @@ Geopsatial-project/
 ├── notebooks/           # preparation notebooks
 ├── scripts/             # analysis entrypoints
 ├── src/                 # reusable modules
-├── outputs/             # tables + intermediate artifacts
-├── reports/figures/     # final report figures
+├── outputs/             # tables, maps + intermediate artifacts
+│   ├── tables/
+│   └── maps/
+├── reports/
+│   ├── figures/         # final report figures
+│   └── maps/            # final report maps
 └── webmap/              # Streamlit app
 ```
 
@@ -80,6 +87,16 @@ Geopsatial-project/
    - SAR (Spatial Autoregressive Model, GMM)
    - SEM (Spatial Error Model, GMM)
    - Post-fit Moran's I comparison
+
+6. **Residual Extraction** (`scripts/07b_extract_residuals.py`)
+   - Extract OLS, SAR, and SEM residuals for map visualization
+
+7. **Map Layers** (`scripts/08_prepare_map_layers.py`)
+   - Prepare point and grid GeoJSON layers for the web map
+
+8. **Spatial Effects** (`scripts/09_compute_spatial_effects.py`)
+   - Compute direct, indirect, and spillover effects from the SAR model
+   - Monte Carlo trace estimation and significance testing
 
 ## CRS Policy
 
