@@ -17,7 +17,11 @@ if [ ! -f "data/processed/model_sample.parquet" ]; then
 fi
 
 if [ ! -f "outputs/tables/residuals_for_map.csv" ]; then
-    echo "Generating residuals..."
+    echo "ERROR: residuals_for_map.csv not found."
+    echo "Run the full pipeline first. See README.md for instructions."
+    exit 1
+else
+    echo "Residuals found, verifying..."
     python scripts/07b_extract_residuals.py
 fi
 

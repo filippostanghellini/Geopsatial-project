@@ -10,12 +10,12 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.config import OUTPUT_FILES, CITY_NAME, CBD_LAT, CBD_LON, TABLES_DIR
+from src.config import OUTPUT_FILES, CITY_NAME, CBD_LAT, CBD_LON, TABLES_DIR, MAPS_DIR
 
 st.set_page_config(page_title=f"{CITY_NAME} Airbnb Spatial Analysis", layout="wide")
 
 st.title(f"{CITY_NAME} Airbnb - Spatial Price Analysis")
-st.markdown("Interactive inspection of **residual patterns** and **spatial spillover effects** from SAR model.")
+st.markdown("Interactive inspection of **residual patterns** and **spatial spillover effects** from SAR/SEM models.")
 
 # ---------- data loading ----------
 
@@ -38,14 +38,59 @@ def load_data():
     if effects_path.exists():
         effects_df = pd.read_csv(effects_path)
 
+    model_comp = None
+    model_comp_path = TABLES_DIR / 'model_comparison.csv'
+    if model_comp_path.exists():
+        model_comp = pd.read_csv(model_comp_path)
+
     spillover_neigh = None
-    spillover_path = TABLES_DIR.parent / 'maps' / 'spillover_neighbourhoods.geojson'
+    spillover_path = OUTPUT_FILES['spillover_neighbourhoods']
     if spillover_path.exists():
         spillover_neigh = gpd.read_file(spillover_path)
 
-    return merged, points_sample, grid_cells, effects_df, spillover_neigh
+    return merged, points_sample, grid_cells, effects_df, model_comp, spillover_neigh
 
-merged, points_sample, grid_cells, effects_df, spillover_neigh = load_data()
+merged, points_sample, grid_cells, effects_df, model_comp, spillover_neigh = load_data()
+
+# ---------- compute dynamic model stats ----------
+
+sar_rho = None
+sdm_rho = None
+sar_r2 = None
+sdm_r2 = None
+ols_r2 = None
+sar_moran = None
+ols_moran = None
+sar_ind_dir_ratio = None
+sdm_total_mult = None
+sar_total_mult = None
+
+if effects_df is not None:
+    sar_eff = effects_df[effects_df['model'] == 'SAR']
+    sdm_eff = effects_df[effects_df['model'] == 'SDM']
+
+    if len(sar_eff) > 0 and 'coefficient' in sar_eff.columns and 'total' in sar_eff.columns:
+        row0 = sar_eff.iloc[0]
+        if row0['coefficient'] != 0:
+            sar_total_mult = abs(row0['total'] / row0['coefficient'])
+            sar_rho = round(1.0 - 1.0 / sar_total_mult, 4)
+            sar_ind_dir_ratio = sar_total_mult - 1.0
+
+    if len(sdm_eff) > 0 and 'beta_X' in sdm_eff.columns and 'total' in sdm_eff.columns:
+        sdm_row0 = sdm_eff.iloc[0]
+        denom = sdm_row0['beta_X'] + sdm_row0['beta_WX']
+        if denom != 0:
+            sdm_total_mult = abs(sdm_row0['total'] / denom)
+            sdm_rho = round(1.0 - 1.0 / sdm_total_mult, 4)
+
+if model_comp is not None:
+    for _, row in model_comp.iterrows():
+        if row['model'] == 'OLS':
+            ols_r2 = row['r_squared']
+            ols_moran = row['moran_I']
+        elif row['model'] == 'SAR':
+            sar_r2 = row['r_squared']
+            sar_moran = row['moran_I']
 
 # ---------- sidebar ----------
 
@@ -68,6 +113,22 @@ if view_mode == "Residual Map":
         max_value=int(merged['accommodates'].max()),
         value=(int(merged['accommodates'].min()), int(merged['accommodates'].max()))
     )
+    # WM-8: neighbourhood and CBD distance filters
+    if 'neighbourhood_cleansed' in merged.columns:
+        neighs = sorted(merged['neighbourhood_cleansed'].dropna().unique())
+        selected_neighs = st.sidebar.multiselect("Neighbourhood", neighs, default=[])
+    else:
+        selected_neighs = []
+    if 'dist_cbd_km' in merged.columns:
+        cbd_range = st.sidebar.slider(
+            "Distance from CBD (km)",
+            min_value=0.0,
+            max_value=float(merged['dist_cbd_km'].max()),
+            value=(0.0, float(merged['dist_cbd_km'].max())),
+            step=0.5
+        )
+    else:
+        cbd_range = None
     st.sidebar.header("Residuals")
     residual_type = st.sidebar.radio("Show residuals from", ["OLS", "SAR", "Comparison (OLS-SAR)"], index=0)
     highlight_threshold = st.sidebar.slider("Highlight threshold (|residual|)", 0.0, 2.0, 0.5, 0.1)
@@ -83,8 +144,19 @@ if view_mode == "Residual Map":
     if selected_rooms:
         room_mask = merged[selected_rooms].any(axis=1)
         mask = mask & room_mask
+    if selected_neighs and 'neighbourhood_cleansed' in merged.columns:
+        mask = mask & merged['neighbourhood_cleansed'].isin(selected_neighs)
+    if cbd_range is not None and 'dist_cbd_km' in merged.columns:
+        mask = mask & (merged['dist_cbd_km'] >= cbd_range[0]) & (merged['dist_cbd_km'] <= cbd_range[1])
 
     filtered = merged[mask].copy()
+    has_active_filters = (
+        price_range != (int(merged['price'].min()), int(merged['price'].quantile(0.95))) or
+        len(selected_rooms) < len(room_types) or
+        accommodates_range != (int(merged['accommodates'].min()), int(merged['accommodates'].max())) or
+        bool(selected_neighs) or
+        (cbd_range is not None and cbd_range != (0.0, float(merged['dist_cbd_km'].max())))
+    )
     st.sidebar.write(f"Filtered: {len(filtered)} / {len(merged)} listings")
 
     if residual_type == "OLS":
@@ -106,12 +178,22 @@ def get_residual_color(val):
     elif val < 1.0:      return '#de2d26'
     else:                return '#a50f15'
 
+
+def _get_neigh_name(row, columns):
+    """Extract neighbourhood name from a GeoDataFrame row, checking common column names."""
+    for col in ['neighbourhood', 'name', 'neighbourhood_cleansed', 'neighbourhood_group']:
+        if col in columns and pd.notna(row.get(col)) and str(row[col]).strip():
+            return str(row[col])
+    return str(row.iloc[0])
+
 # ---------- RESIDUAL MAP ----------
 
 if view_mode == "Residual Map":
     m = folium.Map(location=[CBD_LAT, CBD_LON], zoom_start=12, tiles='CartoDB positron')
 
     if show_grid and grid_cells is not None:
+        if has_active_filters:
+            st.warning("Grid layer is not filtered. It shows all listings. Disable filters or hide grid for accurate comparison.")
         grid_filtered = grid_cells[grid_cells['listing_count'].notna()].copy()
         if residual_type == "OLS":
             grid_col = 'mean_ols_residual'
@@ -178,6 +260,42 @@ if view_mode == "Residual Map":
 
     st.caption("Color: blue = model overestimates, red = underestimates, gray = good fit")
 
+    if ols_r2 is not None or sar_r2 is not None:
+        st.subheader("Model Performance")
+        mc1, mc2, mc3 = st.columns(3)
+        with mc1:
+            ols_r2_str = f"{ols_r2:.4f}" if ols_r2 is not None else "N/A"
+            ols_m_str = f"{ols_moran:.4f}" if ols_moran is not None else "N/A"
+            st.metric("OLS R²", ols_r2_str)
+            st.metric("OLS Moran's I", ols_m_str)
+        with mc2:
+            sar_r2_str2 = f"{sar_r2:.4f}" if sar_r2 is not None else "N/A"
+            sar_m_str = f"{sar_moran:.4f}" if sar_moran is not None else "N/A"
+            st.metric("SAR Pseudo-R²", sar_r2_str2)
+            st.metric("SAR Moran's I", sar_m_str)
+        with mc3:
+            sar_rho_str2 = f"{sar_rho:.4f}" if sar_rho is not None else "N/A"
+            st.metric("SAR ρ (rho)", sar_rho_str2)
+        st.caption("Higher ρ = stronger spatial dependence. Lower Moran's I = better model.")
+
+    st.subheader("Residual Color Scale")
+    st.markdown("""
+    <div style="display:flex; align-items:center; font-size:0.85rem; gap:0;">
+      <div style="background:#08519c;color:white;padding:4px 10px;text-align:center;">&lt;-1</div>
+      <div style="background:#3182bd;color:white;padding:4px 10px;text-align:center;">-1..-0.5</div>
+      <div style="background:#9ecae1;color:#333;padding:4px 10px;text-align:center;">-0.5..-0.1</div>
+      <div style="background:#f7f7f7;color:#333;padding:4px 10px;text-align:center;">-0.1..0.1</div>
+      <div style="background:#fc9272;color:#333;padding:4px 10px;text-align:center;">0.1..0.5</div>
+      <div style="background:#de2d26;color:white;padding:4px 10px;text-align:center;">0.5..1</div>
+      <div style="background:#a50f15;color:white;padding:4px 10px;text-align:center;">&gt;1</div>
+    </div>
+    <div style="font-size:0.8rem;margin-top:4px;color:#666;">
+      <b>&larr; Overestimates</b> (predicted &gt; actual) &nbsp;|&nbsp;
+      <b>Good fit</b> &nbsp;|&nbsp;
+      <b>Underestimates &rarr;</b> (predicted &lt; actual)
+    </div>
+    """, unsafe_allow_html=True)
+
 # ---------- SPILLOVER MAP ----------
 
 elif view_mode == "Spillover Analysis":
@@ -203,6 +321,7 @@ elif view_mode == "Spillover Analysis":
                 continue
             color = spillover_color(share)
             pct = share * 100
+            neigh_name = _get_neigh_name(row, spillover_neigh.columns)
             folium.GeoJson(
                 row.geometry.__geo_interface__,
                 style_function=lambda x, c=color: {
@@ -210,10 +329,10 @@ elif view_mode == "Spillover Analysis":
                     'color': '#333333', 'weight': 1,
                 },
                 tooltip=folium.Tooltip(
-                    f"<b>{row.get('neighbourhood', row.iloc[0])}</b><br>"
+                    f"<b>{neigh_name}</b><br>"
                     f"Spillover share: {pct:.1f}%<br>"
                     f"Listings: {int(row.get('listing_count', 0))}<br>"
-                    f"Mean log price: {row.get('mean_price', 0):.3f}"
+                    f"Mean log price: {row.get('mean_price_y', row.get('mean_price', 0)):.3f}"
                 )
             ).add_to(m)
 
@@ -242,24 +361,32 @@ elif view_mode == "Spillover Analysis":
         top5 = spillover_neigh.nlargest(5, share_col)
         st.markdown("**Top 5 neighbourhoods by spillover intensity:**")
         for _, r in top5.iterrows():
-            name = r.get('neighbourhood', r.iloc[0])
+            name = _get_neigh_name(r, spillover_neigh.columns)
             share = r[share_col] * 100
             st.markdown(f"- **{name}**: {share:.1f}% of predicted price from neighbor effects")
 
     st.subheader("Spatial Feedback Multipliers")
+    sar_rho_str = f"{sar_rho:.4f}" if sar_rho is not None else "N/A"
+    sdm_rho_str = f"{sdm_rho:.4f}" if sdm_rho is not None else "N/A"
+    sar_r2_str = f"{sar_r2:.4f}" if sar_r2 is not None else "N/A"
+    sdm_r2_str = f"{sdm_r2:.4f}" if sdm_r2 is not None else "N/A"
+    sar_mult_str = f"{sar_total_mult:.3f}" if sar_total_mult is not None else "N/A"
+    sdm_mult_str = f"{sdm_total_mult:.3f}" if sdm_total_mult is not None else "N/A"
+    sar_ratio_str = f"{sar_ind_dir_ratio:.3f}" if sar_ind_dir_ratio is not None else "N/A"
+
     st.markdown(f"""
-    The SAR model (simpler) and SDM model (richer) decompose each variable's effect:
+    The SAR model and SDM model decompose each variable's effect:
 
     | Model | ρ | Pseudo-R² | Spillover pattern |
     |---|---|---|---|
-    | **SAR** | 0.251 | 0.476 | All variables share the same indirect/direct ratio (0.325) |
-    | **SDM** | 0.872 | 0.472 | Each variable has its own unique spillover intensity |
+    | **SAR** | {sar_rho_str} | {sar_r2_str} | All variables share the same indirect/direct ratio ({sar_ratio_str}) |
+    | **SDM** | {sdm_rho_str} | {sdm_r2_str} | Each variable has its own unique spillover intensity |
 
     **Why SDM matters**: In SAR, `bedrooms` and `accommodates` have the same spillover ratio.
     In SDM, `bedrooms` has a **strong positive** spillover (more bedrooms nearby → higher prices),
     while `accommodates` has a **negative** spillover (more guests nearby → higher competition → lower prices).
 
-    **Total multipliers**: SAR = 1.335, SDM = 7.806 (higher ρ in SDM means stronger spatial feedback,
+    **Total multipliers**: SAR = {sar_mult_str}, SDM = {sdm_mult_str} (higher ρ in SDM means stronger spatial feedback,
     but offset by negative WX coefficients).
     """)
 
