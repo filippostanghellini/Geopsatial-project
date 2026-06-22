@@ -100,8 +100,15 @@ def wald_test_sdm_restrictions(model_sdm, k, alpha=0.05):
     """
     rho = float(model_sdm.rho.flatten()[0])
     betas_all = model_sdm.betas.flatten()
-    betas_X = betas_all[:k]
-    betas_WX = betas_all[k:2*k]
+    n_total = len(betas_all)
+    if n_total == 2 * k + 2:
+        w_offset = 1
+    elif n_total == 2 * k + 3:
+        w_offset = 2
+    else:
+        w_offset = max(0, n_total - 2 * k - 1)
+    betas_X = betas_all[w_offset:w_offset + k]
+    betas_WX = betas_all[w_offset + k:w_offset + 2 * k]
 
     if not hasattr(model_sdm, 'vm') or model_sdm.vm is None:
         print("  Wald test NOT available — no VC matrix. Use vm=True in GM_Combo.")
@@ -115,7 +122,7 @@ def wald_test_sdm_restrictions(model_sdm, k, alpha=0.05):
 
     # ---- H0_A: θ = 0  (SDM → SAR) ----
     theta = betas_WX
-    V_theta = V_usable[k:2*k, k:2*k]
+    V_theta = V_usable[w_offset + k:w_offset + 2*k, w_offset + k:w_offset + 2*k]
 
     try:
         V_theta_inv = np.linalg.inv(V_theta)
@@ -135,7 +142,7 @@ def wald_test_sdm_restrictions(model_sdm, k, alpha=0.05):
     # ---- H0_B: θ + ρ·β = 0  (SDM → SEM) ----
     c = betas_WX + rho * betas_X
     J = np.hstack([rho * np.eye(k), np.eye(k)])  # Jacobian d(θ+ρβ)/d(β,θ)
-    V_block = V_usable[:2*k, :2*k]
+    V_block = V_usable[w_offset:w_offset + 2*k, w_offset:w_offset + 2*k]
     V_restriction = J @ V_block @ J.T
 
     try:
@@ -220,7 +227,7 @@ def main():
 
     sar_betas = model_sar.betas.flatten()
     if len(sar_betas) > len(X_cols):
-        sar_betas = sar_betas[:len(X_cols)]
+        sar_betas = sar_betas[1:len(X_cols)+1]
 
     sar_impacts, sar_dir, sar_ind, sar_tot = compute_sar_impacts(
         W, rho_sar, sar_betas, X_cols
@@ -230,28 +237,67 @@ def main():
     print(f"  Indirect/direct ratio: {sar_ind/sar_dir:.3f} (constrained, same for all vars)")
 
     # ---- SDM ----
-    print("\n[2/2] Estimating SDM (Spatial Durbin, GMM)...")
-    model_sdm = GM_Combo(y, X, w=w, slx_lags=1, vm=True,
-                          name_y='log_price', name_x=X_cols)
+    # The SDM is estimated on STRUCTURAL variables only (excluding the 86
+    # neighbourhood fixed-effect dummies). Including the neigh_* dummies in a
+    # Spatial Durbin model makes X and WX nearly collinear (kNN neighbours
+    # tend to live in the same neighbourhood), which collapses the model:
+    # Pseudo-R² collapses to ~0 and coefficients explode to ~10^12.
+    # The SAR above keeps the full Model B (with FE) for comparability with OLS;
+    # the SDM drops the FE because WX|X for a one-hot-encoded neighbourhood
+    # dummy is almost identical to X itself in dense urban areas.
+    X_struct_cols = [c for c in X_cols if not c.startswith('neigh_')]
+    X_struct = model_df[X_struct_cols].values
+    k_struct = len(X_struct_cols)
+
+    print(f"\n[2/2] Estimating SDM (Spatial Durbin, GMM) on {k_struct} structural variables (neigh FE dropped)")
+    model_sdm = GM_Combo(y, X_struct, w=w, slx_lags=1, vm=True,
+                          name_y='log_price', name_x=X_struct_cols)
 
     rho_sdm = float(model_sdm.rho.flatten()[0])
-    k = len(X_cols)
     betas_all = model_sdm.betas.flatten()
-    betas_X = betas_all[:k]
-    betas_WX = betas_all[k:2*k]
+    n_total = len(betas_all)
+    if n_total == 2 * k_struct + 2:
+        sdm_offset = 1
+    elif n_total == 2 * k_struct + 3:
+        sdm_offset = 2
+    else:
+        sdm_offset = max(0, n_total - 2 * k_struct - 1)
+    betas_X = betas_all[sdm_offset:sdm_offset + k_struct]
+    betas_WX = betas_all[sdm_offset + k_struct:sdm_offset + 2 * k_struct]
 
     print(f"  ρ = {rho_sdm:.4f}   Pseudo-R² = {model_sdm.pr2:.4f}")
     print(f"  betas_X (n={len(betas_X)}), betas_WX (n={len(betas_WX)})")
 
     sdm_impacts, sdm_R1, sdm_R2, sdm_tot = compute_sdm_impacts(
-        W, rho_sdm, betas_X, betas_WX, X_cols
+        W, rho_sdm, betas_X, betas_WX, X_struct_cols
     )
 
     print(f"\n  Multipliers:  R₁={sdm_R1:.4f}  R₂={sdm_R2:.4f}  total={sdm_tot:.4f}")
     print(f"  (Each variable now has its own indirect/direct ratio)")
 
-    # ---- Elhorst (2010) formal restriction tests ----
-    wald_results = wald_test_sdm_restrictions(model_sdm, k, alpha=0.05)
+    # ---- Append SDM to model_comparison.csv (SAR/SEM rows come from script 07) ----
+    comp_path = TABLES_DIR / 'model_comparison.csv'
+    if comp_path.exists():
+        comp_df = pd.read_csv(comp_path)
+        if 'SDM' not in comp_df['model'].values:
+            sdm_row = pd.DataFrame({
+                'model': ['SDM'],
+                'r_squared': [model_sdm.pr2],
+                'rho': [rho_sdm],
+                'lambda': [np.nan],
+                'moran_I': [np.nan],
+                'moran_p': [np.nan],
+            })
+            # Ensure columns align (rho/lambda may be missing in old CSVs)
+            for c in ['rho', 'lambda', 'moran_I', 'moran_p']:
+                if c not in comp_df.columns:
+                    comp_df[c] = np.nan
+            comp_df = pd.concat([comp_df, sdm_row[comp_df.columns]], ignore_index=True)
+            save_csv(comp_df, comp_path)
+            print(f"  Appended SDM row to {comp_path}")
+
+    # ---- Elhorst (2010) formal restriction tests (on structural SDM) ----
+    wald_results = wald_test_sdm_restrictions(model_sdm, k_struct, alpha=0.05)
 
     lm_df = pd.read_csv(TABLES_DIR / 'lm_diagnostic_tests.csv') if (TABLES_DIR / 'lm_diagnostic_tests.csv').exists() else None
 
@@ -267,9 +313,9 @@ def main():
     print("-" * 80)
 
     for var in key_vars:
-        if var in X_cols:
-            idx = X_cols.index(var)
-            s = sar_impacts[idx]
+        if var in X_struct_cols:
+            idx = X_struct_cols.index(var)
+            s = sar_impacts[X_cols.index(var)]
             d = sdm_impacts[idx]
             print(f"  {var:<18s} │ {s['direct']:10.4f} {s['indirect']:12.4f} │ "
                   f"{d['direct']:10.4f} {d['indirect']:12.4f} {d['beta_WX']:11.4f}")
@@ -289,9 +335,13 @@ def main():
     sar_resid = model_sar.u.flatten()
     sdm_resid = model_sdm.u.flatten()
 
+    # SAR uses the full Model B (124 X cols); SDM uses structural-only (no FE).
     Xb_sar = X @ sar_betas
-    Xb_sdm = X @ betas_X
+    Xb_sdm = X_struct @ betas_X
     Wy = W @ y
+
+    sar_intercept = float(model_sar.betas.flatten()[0])
+    sdm_intercept = float(model_sdm.betas.flatten()[0])
 
     spillover = pd.DataFrame({
         'listing_id': model_df['listing_id'].values,
@@ -301,7 +351,7 @@ def main():
         'sar_rho_Wy': rho_sar * Wy,
         'sdm_own': Xb_sdm,
         'sdm_rho_Wy': rho_sdm * Wy,
-        'sdm_WX_contrib': X @ betas_WX,
+        'sdm_WX_contrib': X_struct @ betas_WX,
         'sar_residual': sar_resid,
         'sdm_residual': sdm_resid,
         'lat': model_df['latitude'].values,
@@ -310,11 +360,11 @@ def main():
 
     spillover['sar_spillover_share'] = (
         np.abs(spillover['sar_rho_Wy']) /
-        (np.abs(spillover['sar_own']) + np.abs(spillover['sar_rho_Wy']) + 1e-6)
+        (np.abs(sar_intercept + spillover['sar_own']) + np.abs(spillover['sar_rho_Wy']) + 1e-6)
     )
     spillover['sdm_spillover_share'] = (
         np.abs(spillover['sdm_rho_Wy']) /
-        (np.abs(spillover['sdm_own']) + np.abs(spillover['sdm_WX_contrib']) + np.abs(spillover['sdm_rho_Wy']) + 1e-6)
+        (np.abs(sdm_intercept + spillover['sdm_own']) + np.abs(spillover['sdm_WX_contrib']) + np.abs(spillover['sdm_rho_Wy']) + 1e-6)
     )
 
     save_csv(spillover, TABLES_DIR / 'spillover_listings.csv')
